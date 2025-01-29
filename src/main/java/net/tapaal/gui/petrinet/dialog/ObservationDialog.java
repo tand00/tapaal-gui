@@ -42,18 +42,25 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.util.List;
+import java.util.Optional;
+import java.util.regex.Pattern;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 
 public class ObservationDialog extends EscapableDialog {
     private static final String SHARED = "Shared";
-
+    private static final Pattern namePattern = Pattern.compile("\\w+(?: \\w+)*");
+    
     private final DefaultListModel<Observation> observationModel;
     private final Observation observation;
 
     private final TimedArcPetriNetNetwork tapnNetwork;
     private final JTextPane expressionField = new JTextPane();
     private final UndoManager undoManager = new UndoManager();
+
+    private JComboBox<Object> templateComboBox;
+    private JComboBox<TimedPlace> placeComboBox;
     
     private JPanel placesPanel;
     private JPanel constantsPanel;
@@ -66,6 +73,7 @@ public class ObservationDialog extends EscapableDialog {
 
     private ObsExpression currentExpr;
     private ObsExpression selectedExpr;
+    private ObsExpression previousExpr;
 
     private boolean isNewObservation;
     private boolean isEditing;
@@ -132,6 +140,27 @@ public class ObservationDialog extends EscapableDialog {
                 ObsExprPosition exprPos = currentExpr.getObjectPosition(pos - 1);
                 expressionField.select(exprPos.getStart(), exprPos.getEnd());
                 selectedExpr = exprPos.getObject();
+                if (selectedExpr.isPlace()) {
+                    String[] placeParts = selectedExpr.toString().split("\\.");
+                    String templateName = placeParts[0];
+                    String placeName = placeParts[1];
+                    Optional<?> selectedTemplateOpt = tapnNetwork.activeTemplates().stream()
+                        .filter(t -> t.name().equals(templateName))
+                        .findFirst();
+
+                    if (!selectedTemplateOpt.isPresent()) {
+                        selectedTemplateOpt = Optional.of(SHARED);
+                    }
+
+                    Object selectedTemplate = selectedTemplateOpt.get();
+                    templateComboBox.setSelectedItem(selectedTemplate);
+            
+                    if (selectedTemplate.equals(SHARED)) {
+                        placeComboBox.setSelectedItem(tapnNetwork.getSharedPlaceByName(placeName));
+                    } else {
+                        placeComboBox.setSelectedItem(((TimedArcPetriNet)selectedTemplate).getPlaceByName(placeName));
+                    }
+                }
 
                 Enabler.setAllEnabled(placesPanel, selectedExpr.isLeaf());
                 Enabler.setAllEnabled(constantsPanel, selectedExpr.isLeaf());
@@ -176,20 +205,31 @@ public class ObservationDialog extends EscapableDialog {
         placesPanel.setLayout(new GridBagLayout());
         placesPanel.setBorder(BorderFactory.createTitledBorder("Places"));
 
-        JComboBox<Object> templateComboBox = new JComboBox<>();
-        tapnNetwork.activeTemplates().forEach(templateComboBox::addItem);
+        templateComboBox = new JComboBox<>();
+        tapnNetwork.activeTemplates().forEach(template -> {
+            List<TimedPlace> places = template.places();
+            long sharedPlaces = places.stream().filter(TimedPlace::isShared).count();
+            if (sharedPlaces != places.size() && !template.name().equals(SHARED)) {
+                templateComboBox.addItem(template);
+            }
+        });
+
         if (tapnNetwork.sharedPlaces().size() > 0) {
             templateComboBox.addItem(SHARED);
         }
 
-        JComboBox<TimedPlace> placeComboBox = new JComboBox<>();
+        placeComboBox = new JComboBox<>();
         templateComboBox.addActionListener(e -> {
             placeComboBox.removeAllItems();
             if (templateComboBox.getSelectedItem().equals(SHARED)) {
                 tapnNetwork.sharedPlaces().forEach(place -> placeComboBox.addItem(place));
             } else {
-                TimedArcPetriNet template = (TimedArcPetriNet) templateComboBox.getSelectedItem();
-                template.places().forEach(place -> placeComboBox.addItem(place));
+                TimedArcPetriNet template = (TimedArcPetriNet)templateComboBox.getSelectedItem();
+                template.places().forEach(place -> {
+                    if (!place.isShared()) {
+                        placeComboBox.addItem(place);
+                    }
+                });
             }
         });
 
@@ -278,7 +318,6 @@ public class ObservationDialog extends EscapableDialog {
         resetExpression.addActionListener(e -> {
             if (isEditing) {
                 try {
-                    System.out.println("Parsing expression: " + expressionField.getText());
                     ObsExpression parsedExpr = ObservationParser.parse(expressionField.getText(), tapnNetwork);
                     toggleManualEditing();  
                     currentExpr = parsedExpr;
@@ -364,6 +403,15 @@ public class ObservationDialog extends EscapableDialog {
 
         cancelButton.addActionListener(e -> dispose());
         saveButton.addActionListener(e -> {
+            nameField.setText(nameField.getText().trim());
+            if (!namePattern.matcher(nameField.getText()).matches()) {
+                JOptionPane.showMessageDialog(TAPAALGUI.getApp(), "\"The specified name is invalid.\n" +
+                                        "Acceptable names are defined by the regular expression:\n" +
+                                        namePattern, "Error", JOptionPane.ERROR_MESSAGE);                        
+                nameField.requestFocusInWindow();
+                return;
+            }
+
             boolean nameExists = false;
             for (int i = 0; i < observationModel.getSize(); i++) {
                 Observation obs = observationModel.getElementAt(i);
@@ -420,19 +468,18 @@ public class ObservationDialog extends EscapableDialog {
 
         if (isEditing) {
             saveButton.setEnabled(false);
-        } else {
-            saveButton.setEnabled(!includesPlaceHolder());
-        }
-
-        expressionField.setEditable(isEditing);
-    
-        if (isEditing) {
+            previousExpr = currentExpr.deepCopy();
             resetExpression.setText("Parse Expression");
             editExpression.setText("Cancel");
         } else {
+            saveButton.setEnabled(!includesPlaceHolder());
+            currentExpr = previousExpr;
+            expressionField.setText(currentExpr.toString());
             resetExpression.setText("Reset Expression");
             editExpression.setText("Edit Expression");
         }
+
+        expressionField.setEditable(isEditing);
     }
 
     private void updateExpression(ObsExpression newExpr) {
